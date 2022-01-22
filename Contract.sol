@@ -4,7 +4,7 @@ pragma solidity 0.8.7;
 
 contract Training {
 
-    uint private startPrice = 20000000000000000; // 0.02ETH
+    uint public startPrice = 20000000000000000; // 0.02ETH
     uint private priceLevel = 0;
     uint public totalSupply = 1_111;
 
@@ -61,9 +61,11 @@ contract Training {
     /**
     *    Records the amount of a bid to return it to the seller
     *
-    *   _skullIndex => _amount
+    *   _address => _amount
     */
-    mapping(uint => uint) withdrawBidsPending;
+    mapping(address => uint) withdrawPending;
+
+
 
 
     /**
@@ -79,7 +81,16 @@ contract Training {
     /**
     *   Do transfer from _lastOwner to _newOwner
     */
-    event Transfer(address _lastOwner, address _newOwner);
+    event Transfer(address _lastOwner, address _newOwner, bool isAccepted);
+
+    /**
+    *  Prevent if Auction is open or close
+    */
+    event AuctionState(uint _skullIndex, bool _isOpen, bool _isExpired);
+
+
+
+
 
     constructor() {
         owner = msg.sender;
@@ -87,17 +98,23 @@ contract Training {
         actualPrice = startPrice;
     }
 
+
+
+
+
     /*
     *   Just to buy Skull. Not for auction or others,
     *   when 1110 skulls are solds, function will be not usable
     */
-    function buySkull() public payable {
-        require(msg.sender != owner, "Action unauthorized");
+    function buySkull() external payable {
+        require(msg.sender != owner, "Buyer can't be owner");
         require(msg.value > 0, "Value sended too low");
-        require(msg.sender != owner, "Seller can't be owner");
         require(skullRemainsForSale > 1, "Skull remains for sale must be > 1");
         require(msg.sender.balance >= msg.value, "Not enough money to buy this item");
 
+        payable(address(this)).transfer(msg.value);
+
+        withdrawPending[owner] += msg.value;
         acquisitionCount[msg.sender]++;
 
         Skull memory _skull = Skull(nextSkullIndexToSale, msg.sender, getRarity(), msg.value, true);
@@ -112,34 +129,41 @@ contract Training {
     }
 
     /**
-    *   Open or close aution
+    *   Open , close or set aution to Expired
     */
-    function setAuctionState(uint _skullIndex, bool _isOpen) external {
+    function setAuctionState(uint _skullIndex, bool _isOpen, bool _isExpired) external {
         require(msg.sender == owner, "Action unauthorized");
+        require(skullRemainsForSale <= 1, "Must remains 1 or 0 skulls");
+
         areOpenToBid[_skullIndex] = _isOpen;
+
+        emit AuctionState(_skullIndex, _isOpen, _isExpired);
     }
 
     /**
     *   To place a bid, but all Skulls must be sold.
+    *
     *   Minimal price is based on _lastBid price if exist otherwise
     *   on Skull purchase price
+    *
     */
-    function placeBid(uint _skullIndex, uint _price, address _bidder) external payable {
+    function placeBid(uint _skullIndex) external payable {
         require(areOpenToBid[_skullIndex] == true, "Auction not open");
-        require(msg.sender != owner, "Action unauthorized");
+        require(msg.sender != owner, "Sender can't be contract owner");
         require(msg.sender != skulls[_skullIndex].owner, "Skull owner cannot place bid on his item");
-        require(_bidder != address(0), "Address not valid");
         require(_skullIndex < totalSupply, "Index out of range");
         require(skullRemainsForSale == 0, "All skulls must be selled to do bid");
 
-        _createBid(_skullIndex, _price, _bidder);
+        _createBid(_skullIndex);
     }
 
     /**
     *    Only authorized by skulls Golds owner
     */
-    function placeXRarBid(uint _price, address _bidder) external payable {
+    function placeXRarBid() external payable {
         require(skullRemainsForSale == 1, "Only one skull should remain");
+        require(msg.sender != owner, "Sender can't be contract owner");
+        require(msg.value > 0, "Price to low");
 
         bool _isGoldOwner;
 
@@ -154,36 +178,50 @@ contract Training {
 
         require(_isGoldOwner == true, "Authorized only for Golds Skull owner");
 
-        _createBid(totalSupply - 1, _price, _bidder);
+        _createBid(totalSupply - 1);
     }
 
     /**
-    *   To Create a bid
+    *   Create a bid
+    *   Cancel last bid and reimburse last bidder if exist then send new bid price from new bidder to contract
+    *   Otherwise if no bid exist on this skullIndex transfer money from bidder to contract
     */
-    function _createBid(uint _skullIndex, uint _price, address _bidder) internal {
-        payable(address(this)).transfer(_price);
-        withdrawBidsPending[_skullIndex] = _price;
+    function _createBid(uint _skullIndex) private {
 
+        address _actualOwner = skulls[_skullIndex].owner;
         Bid memory _lastBid = bids[_skullIndex];
 
         if (_lastBid.exist == true)
         {
-            require(_price > _lastBid.price, "New price lower than old price");
-            require(_lastBid.skull.owner != _bidder, "Cannot place bid for owner of item");
+            require(msg.value > _lastBid.price, "New price lower than old price");
+            require(_lastBid.skull.owner != msg.sender, "Cannot place bid for owner of item");
 
-            Bid memory _newBid = Bid(_lastBid.skull, _bidder, _price, true, false, false);
+            payable(address(this)).transfer(msg.value);
+            // Send money from _newBidder to contract
+
+            withdrawPending[_lastBid.bidder] += _lastBid.price;
+            withdrawPending[_actualOwner] -= _lastBid.price;
+
+            withdrawPending[_actualOwner] += msg.value;
+
+            Bid memory _newBid = Bid(_lastBid.skull, msg.sender, msg.value, true, false, false);
+
             bids[_skullIndex] = _newBid;
             emit PlaceBid(_newBid);
-        } else {
-            require(skulls[_skullIndex].owner != _bidder, "Cannot place bid for owner of item");
-            require(_price > _lastBid.skull.price, "Bid price lower than purchase price");
 
-            Bid memory _newBid = Bid(skulls[_skullIndex], _bidder, _price, true, false, false);
+        } else {
+            require(skulls[_skullIndex].owner != msg.sender, "Cannot place bid for owner of item");
+            require(msg.value > skulls[_skullIndex].price, "Bid price lower than purchase price");
+
+            payable(address(this)).transfer(msg.value);
+            // Send money from _newBidder to contract
+
+            withdrawPending[_actualOwner] += msg.value;
+
+            Bid memory _newBid = Bid(skulls[_skullIndex], msg.sender, msg.value, true, false, false);
             bids[_skullIndex] = _newBid;
             emit PlaceBid(_newBid);
         }
-
-
     }
 
     /**
@@ -200,8 +238,8 @@ contract Training {
 
         if (_isAccept == true)
         {
-            Bid memory _bid = bids[_skullIndex];
-            address _bidder = _bid.bidder;
+            Bid memory _lastBid = bids[_skullIndex];
+            address _bidder = _lastBid.bidder;
 
             skulls[_skullIndex].owner = _bidder;
             bids[_skullIndex].isAccepted = true;
@@ -209,9 +247,7 @@ contract Training {
             acquisitionCount[_lastOwner]--;
             acquisitionCount[_bidder]++;
 
-            payable(msg.sender).transfer(_bid.price);
-
-            emit Transfer(msg.sender, _bidder);
+            emit Transfer(msg.sender, _bidder, true);
         } else {
 
             Bid memory _bid = bids[_skullIndex];
@@ -220,39 +256,43 @@ contract Training {
             bids[_skullIndex].isAccepted = false;
 
             payable(_bidder).transfer(_bid.price);
+
+            withdrawPending[msg.sender] -= _bid.price;
+            withdrawPending[_bidder] += _bid.price;
+
+            emit Transfer(msg.sender, _bidder, false);
         }
 
-        withdrawBidsPending[_skullIndex] = 0;
         bids[_skullIndex].isDone = true;
         areOpenToBid[_skullIndex] = false;
     }
 
-    // /**
-    // *   Must be called by seller and not by bidder.
-    // *   Accept bid for
-    // */
-    // function acceptBidForSkull(uint _skullIndex, uint minPrice) external {
-    //     require(_skullIndex < totalSupply, "Index out of range");
-    //     require(skullRemainsForSale != 0, "All skulls must selled to do bid");
-    //     require(bids[_skullIndex].skull.owner == msg.sender);
-    //     address _seller = msg.sender;
+    //Function to delete
+    function setSkullRemainsForSale(uint _value) public {
+        skulls[totalSupply - 2] = Skull(totalSupply - 2, 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2, "Gold", uint(90000000000000000), true);
+        skulls[totalSupply - 3] = Skull(totalSupply - 3, 0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db, "Gold", uint(100000000000000000), true);
+        skulls[totalSupply - 4] = Skull(totalSupply - 4, 0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db, "Gold", uint(200000000000000000), true);
+        skullRemainsForSale = _value;
+    }
 
-    //     Bid bid = bids[_skullIndex];
+    // Get actual money on contract
+    function getContractBalance() public view returns (uint) {
+        return address(this).balance;
+    }
 
-    //     require(bid.value == 0);
-    //     require(bid.value < minPrice);
+    // Retrieve money pending
+    function withdrawMoneyPendings(uint _skullIndex) external payable {
+        require(msg.sender != owner, "Action unauthorized");
+        require(skullRemainsForSale == 0, "All skulls must selled to withdraw money pendings");
+        require(areOpenToBid[_skullIndex] == false, "Auction must be done !");
+        require(address(this).balance > 0, "Nothing to withdraw");
 
-    //     punkIndexToAddress[_skullIndex] = bid.bidder;
-    //     acquisitionCount[_seller]--;
-    //     acquisitionCount[bid.bidder]++;
-    //     Transfer(_seller, bid.bidder, 1);
+        uint _amount = withdrawPending[msg.sender];
+        payable(msg.sender).transfer(_amount);
 
-    //     punksOfferedForSale[_skullIndex] = Offer(false, _skullIndex, bid.bidder, 0, 0x0);
-    //     uint amount = bid.value;
-    //     punkBids[_skullIndex] = Bid(false, _skullIndex, 0x0, 0);
-    //     pendingWithdrawals[_seller] += amount;
-    //     PunkBought(_skullIndex, bid.value, _seller, bid.bidder);
-    // }
+        withdrawPending[msg.sender] = 0;
+    }
+
 
     function getRarity() public view returns (string memory) {
         if (skullRemainsForSale == 1) {// remain 1 gold
@@ -328,21 +368,25 @@ contract Training {
         return false;
     }
 
-    //Function to delete
-    function setSkullRemainsForSale(uint _value) public {
-        skulls[totalSupply - 2] = Skull(totalSupply - 2, 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2, "Gold", uint(90000000000000000), true);
-        skulls[totalSupply - 3] = Skull(totalSupply - 3, 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2, "Gold", uint(100000000000000000), true);
-        skullRemainsForSale = _value;
-    }
-
-    // Get actual money on contract
-    function getContractBalance() public view returns (uint) {
-        return address(this).balance;
-    }
-
-    function withdraw() public payable {
+    /**
+    *   Retrieve only owner balance
+    */
+    function ownerWithdraw() external payable {
         require(msg.sender == owner, "Action unauthorized");
         require(address(this).balance > 0, "Nothing to withdraw");
-        payable(msg.sender).transfer(address(this).balance);
+
+        uint _amount = withdrawPending[owner];
+        payable(owner).transfer(_amount);
+
+        withdrawPending[owner] = 0;
+    }
+
+    // Get % of _price
+    function getRoyalties(uint _price) private view returns (uint) {
+        if (skullRemainsForSale == 0)
+        {
+            return uint256(_price * 10) / 100;
+        }
+        return 0;
     }
 }
